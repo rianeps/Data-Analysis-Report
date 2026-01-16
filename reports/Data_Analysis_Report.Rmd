@@ -1,0 +1,487 @@
+---
+title: "Predicting MOOC Completion from Early Engagement Patterns"
+subtitle: "Analysis of FutureLearn Cyber Security Course Data"
+author: "Nepoliyan Ria"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+fontsize: 12pt
+geometry: margin=1in
+header-includes:
+   - \usepackage{tocloft}
+   - \setlength{\cftbeforesecskip}{2pt}
+output:
+  pdf_document:
+    latex_engine: xelatex
+    toc: false
+    toc_depth: 2
+    number_sections: true
+    fig_caption: true
+---
+
+```{r setup, include=FALSE}
+# Find project root dynamically
+find_project_root <- function() {
+  # Start from current directory
+  current <- getwd()
+  
+  # Check current directory
+  if (file.exists(file.path(current, "config", "global.dcf"))) {
+    return(current)
+  }
+  
+  # Check parent directory (if Rmd is in reports/)
+  parent <- normalizePath("..")
+  if (file.exists(file.path(parent, "config", "global.dcf"))) {
+    return(parent)
+  }
+  
+  # Check grandparent
+  grandparent <- normalizePath("../..")
+  if (file.exists(file.path(grandparent, "config", "global.dcf"))) {
+    return(grandparent)
+  }
+  
+  stop("Cannot find ProjectTemplate root. Ensure config/global.dcf exists.")
+}
+
+proj_root <- find_project_root()
+
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 8,
+  fig.height = 4,
+  out.width = "85%",
+  out.height = "30%",
+  fig.align = 'center',
+  fig.pos = "H"
+)
+
+knitr::opts_knit$set(root.dir = proj_root)
+
+if (file.exists(file.path(proj_root, "renv", "activate.R"))) {
+  source(file.path(proj_root, "renv", "activate.R"))
+}
+
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(stringr)
+library(readr)
+library(tibble)
+
+cache_dir <- file.path(proj_root, "cache")
+cache_files <- list.files(cache_dir, pattern = "\\.(RData|rda)$", full.names = TRUE, ignore.case = TRUE)
+for (f in cache_files) {
+  load(f, envir = .GlobalEnv)
+}
+
+required_objs <- c(
+  "completion_overall",
+  "completion_by_week1_level",
+  "learner_summary",
+  "learner_summary_active",
+  "learner_with_week1",
+  "learner_with_week1_active",
+  "step_activity_clean",
+  "steps_per_run",
+  "week1_steps_per_run",
+  "week1_summary",
+  "week1_by_completion",
+  "engagement_by_completion",
+  "dup_groups_step_activity",
+  "enrolments_all",
+  "step_activity_all"
+)
+
+missing <- setdiff(required_objs, ls(envir = .GlobalEnv))
+if (length(missing) > 0) stop(paste("Missing objects:", paste(missing, collapse = ", ")))
+
+source(file.path(proj_root, "src", "visualization_functions.R"))
+```
+
+# Executive Summary
+
+This report analyzes seven runs of the FutureLearn MOOC "Cyber Security: Safety at Home, Online, and in Life" using two CRISP-DM cycles to investigate whether early engagement predicts course completion.
+
+**Key Findings:** 
+
+* **Completion rate:** `r round(completion_overall$completion_rate * 100, 1)`% overall; `r round((completion_overall$n_active / completion_overall$n_enrolled) * 100, 1)`% of enrolled learners engage with at least one step
+* **Week 1 as predictor:** High Week 1 engagers (≥75% complete) achieve `r round(filter(completion_by_week1_level, week1_engagement_level == "High")$completion_rate * 100, 1)`% completion vs. `r round(filter(completion_by_week1_level, week1_engagement_level == "Very Low")$completion_rate * 100, 1)`% for low engagers—a `r round(filter(completion_by_week1_level, week1_engagement_level == "High")$completion_rate / filter(completion_by_week1_level, week1_engagement_level == "Very Low")$completion_rate, 1)`× difference
+* **Intervention threshold:** Learners completing <40% of Week 1 should be flagged for targeted support by day 7
+
+These findings enable early identification of at-risk learners and timely intervention strategies.
+
+# Introduction
+
+## Context and Motivation
+
+MOOCs have democratized education but face persistent high dropout rates. Understanding what distinguishes completers from early disengagers is critical for improving course design and learner support. Learning analytics—"the measurement, collection, analysis and reporting of data about learners and their contexts, for purposes of understanding and optimising learning"—provides tools to identify patterns that predict success and inform interventions.
+
+## Dataset Description
+
+This analysis uses data from **seven runs** of the FutureLearn MOOC *Cyber Security: Safety at Home, Online, and in Life*. The combined dataset consists of two primary tables:
+
+- **Enrollment data:** **`r format(nrow(enrolments_all), big.mark=",")`** rows × **`r ncol(enrolments_all)`** columns  
+- **Step-level activity data:** **`r format(nrow(step_activity_all), big.mark=",")`** rows × **`r ncol(step_activity_all)`** columns  
+
+The enrollment table contains one record per learner per course run, including enrollment identifiers, course completion status, completion timestamps, and limited demographic variables (age range, gender, education level, and employment status).
+
+The step-level activity table records individual learner interactions with course steps, including step identifiers, visit timestamps, and completion indicators. These data enable fine-grained measurement of engagement intensity, persistence, and timing throughout the course.
+
+As is typical for MOOC datasets, engagement is highly skewed: many enrolled learners never interact with course content, while a smaller subset accounts for most activity. Demographic variables contain substantial missingness, reflecting optional profile completion. Consequently, the analysis focuses primarily on behavioural engagement patterns—particularly early-course activity—rather than demographic predictors.
+
+
+## Investigation Aim
+
+**Research Question:** Can early-course engagement behavior predict MOOC completion?
+
+**Approach:** Two CRISP-DM cycles—(1) explore overall engagement patterns; (2) investigate Week 1 as predictor.
+
+# CYCLE 1: Overall Engagement and Completion Patterns
+
+## Business Understanding
+
+* **Objectives:** Understand completion patterns to improve learner outcomes, optimize course design, and target support effectively.
+
+* **Data Mining Goals:** Define completion; quantify engagement; compare completers vs. non-completers; identify dropout timing.
+
+* **Success Criteria:** Articulate distinguishing factors; identify predictive metrics; generate Cycle 2 hypotheses.
+
+## Data Understanding
+
+### Initial Data Exploration
+
+The dataset combines information from multiple sources. Table 1 provides an overview of enrollment and completion statistics across all seven course runs:
+
+
+```{r enrollment-summary}
+enroll_summary <- tibble(
+  Metric = c(
+    "Total Enrollments",
+    "Active Learners (≥1 step)",
+    "Learners Who Completed",
+    "Activation Rate",
+    "Completion Rate (all enrolled)",
+    "Completion Rate (active only)"
+  ),
+  Value = c(
+    format(completion_overall$n_enrolled, big.mark = ","),
+    format(completion_overall$n_active, big.mark = ","),
+    format(completion_overall$n_completed, big.mark = ","),
+    paste0(round((completion_overall$n_active / completion_overall$n_enrolled) * 100, 1), "%"),
+    paste0(round(completion_overall$completion_rate * 100, 1), "%"),
+    paste0(round(mean(learner_summary_active$completed) * 100, 1), "%")
+  )
+)
+
+kable(enroll_summary, 
+      caption = "Overall Enrollment and Completion Statistics",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position", "scale_down"), font_size = 9)
+```
+
+
+**Key observations:**
+
+* A substantial proportion (`r round((1 - completion_overall$n_active / completion_overall$n_enrolled) * 100, 1)`%) of enrolled learners never engage with any course content, representing a significant "activation gap"
+* Among those who do engage with at least one step, the completion rate is notably higher (`r round(mean(learner_summary_active$completed) * 100, 1)`% vs. `r round(completion_overall$completion_rate * 100, 1)`%), suggesting that initial activation is a critical hurdle
+* The overall completion rate of `r round(completion_overall$completion_rate * 100, 1)`% aligns with typical MOOC completion rates reported in the literature (5-15%), confirming this dataset is representative of broader MOOC patterns
+
+### The Completion Funnel
+
+```{r completion-funnel, fig.cap="Learner progression from enrollment to completion shows significant dropoff at each stage"}
+plot_completion_funnel(completion_overall)
+```
+
+Figure 1 illustrates dramatic attrition from enrollment to completion, highlighting two critical transition points: enrollment to activation (many enroll but never start) and activation to completion (even active learners mostly don't finish).
+
+### Distribution of Engagement
+
+```{r steps-distribution, fig.cap="Bimodal distribution shows clear separation between early dropouts and committed learners"}
+plot_steps_distribution(
+  learner_summary_active, 
+  total_steps = round(mean(steps_per_run$total_steps_in_course))
+)
+```
+
+Figure 2 reveals a **bimodal distribution**: learners who drop out after minimal engagement (1-10 steps) versus those who engage substantially or complete the course. This suggests two distinct populations with fundamentally different engagement trajectories.
+
+### Engagement Metrics Comparison
+
+```{r engagement-comparison, fig.cap="Completers show consistently higher engagement across all metrics"}
+plot_engagement_comparison(learner_summary_active)
+```
+
+\newpage
+
+```{r engagement-table}
+engagement_table <- engagement_by_completion %>%
+  mutate(
+    completed = ifelse(completed, "Completed", "Did Not Complete"),
+    across(where(is.numeric), ~round(.x, 1))
+  ) %>%
+  select(
+    Status = completed,
+    N = n,
+    `Mean Steps` = mean_steps_completed,
+    `Median Steps` = median_steps_completed,
+    `Mean Weeks` = mean_weeks_active
+  )
+
+kable(engagement_table,
+      caption = "Engagement Metrics by Completion Status (Active Learners Only)",
+      booktabs = TRUE,
+      format.args = list(big.mark = ",")) %>%
+  kable_styling(latex_options = c("hold_position", "scale_down"), font_size = 9)
+```
+
+Figure 3 and Table 2 demonstrate completers consistently outperform non-completers across all engagement dimensions. Median values show particularly stark differences, indicating completion is associated with sustained, substantial engagement rather than sporadic activity.
+
+### Temporal Patterns: When Do Learners Drop Out?
+
+```{r weekly-retention, fig.cap="Retention drops sharply in early weeks, then stabilizes among committed learners"}
+plot_weekly_retention(step_activity_clean)
+```
+
+Figure 4 shows a characteristic MOOC retention curve: steep initial decline in Weeks 1-3, then stabilization among learners who persist beyond Week 3. Early weeks are critical for retention.
+
+### Data Quality Considerations
+
+Demographic data shows substantial missingness (gender: `r sum(is.na(learner_summary$gender))`, age: `r sum(is.na(learner_summary$age_range))`, education: `r sum(is.na(learner_summary$highest_education_level))`), limiting subgroup analysis. This is typical for MOOC data where profile completion is optional.
+
+## Data Preparation
+
+### Defining Completion
+
+A critical decision in this analysis is how to operationalize "course completion." We considered two approaches:
+
+**Approach 1 (Selected):** A learner is considered to have "completed" the course if they have a non-missing `fully_participated_at` timestamp in the enrollment data. This approach:
+
+* Uses FutureLearn's own completion criteria, which is the platform's authoritative definition
+* Is objective and verifiable, based on system-recorded timestamps
+* Likely requires completing a substantial majority of course content, not just accessing materials
+
+**Approach 2 (Not used):** Define completion as reaching ≥80% of total steps completed. While this threshold-based approach offers flexibility, the `fully_participated_at` flag is more authoritative and specifically accounts for FutureLearn's completion requirements, which may include additional criteria beyond step completion (e.g., quiz performance, discussion participation).
+
+We selected Approach 1 to align with the platform provider's own definition of success and to ensure our findings are directly relevant to FutureLearn's business objectives.
+
+### Data Cleaning Steps
+
+All data preprocessing was performed programmatically to ensure reproducibility:
+
+1. **Combining course runs:** Merged data from 7 separate course runs into unified datasets using `map_dfr()` to preserve run identifiers
+2. **Duplicate handling:** Identified and removed `r nrow(dup_groups_step_activity)` duplicate learner-step records by keeping the most recent interaction for each unique learner-step combination
+3. **Timestamp parsing:** Converted all timestamp columns to proper POSIXct datetime format in UTC timezone, handling empty strings as missing values
+4. **Missing value treatment:**
+   - Learners with no activity: Set engagement metrics (steps completed, weeks active) to 0 to distinguish them from truly missing data
+   - Demographic "Unknown" values: Converted to explicit NA for proper missing data handling and accurate missingness reporting
+5. **Derived variables:** Created binary `step_completed` flag (based on presence of `last_completed_at` timestamp) and calculated per-learner summary statistics including total steps completed, weeks active, and engagement duration
+
+**Week 1 Metrics (for Cycle 2):** Additionally created Week 1-specific variables: `week1_steps_completed`, `week1_completion_rate`, and `week1_engagement_level` with five ordered categories (None/Very Low/Low/Medium/High) based on completion percentage thresholds (<1%, 1-9%, 10-39%, 40-74%, ≥75%). These thresholds were chosen to create meaningful behavioral distinctions while maintaining reasonable group sizes for analysis.
+
+All data processing was performed using `dplyr` pipelines in the `munge/` scripts, ensuring full reproducibility and transparency.
+
+## Modeling (Cycle 1)
+
+### Descriptive Analysis
+
+Rather than predictive modeling, Cycle 1 focuses on descriptive statistics and visualization to understand patterns.
+
+```{r cycle1-summary}
+summary_stats <- learner_summary_active %>%
+  group_by(completed) %>%
+  summarise(
+    N = n(),
+    `Steps (Mean)` = round(mean(total_steps_completed), 1),
+    `Steps (Median)` = median(total_steps_completed),
+    `Weeks (Mean)` = round(mean(num_weeks_active), 1),
+    .groups = "drop"
+  ) %>%
+  mutate(completed = ifelse(completed, "Completed", "Did Not Complete"))
+
+kable(summary_stats,
+      caption = "Engagement Statistics by Completion Status",
+      booktabs = TRUE,
+      format.args = list(big.mark = ",")) %>%
+  kable_styling(latex_options = c("hold_position", "scale_down"), font_size = 9)
+```
+
+**Effect sizes:** Completers complete `r round(filter(summary_stats, completed == "Completed")$'Steps (Mean)' / filter(summary_stats, completed == "Did Not Complete")$'Steps (Mean)', 1)`× more steps and are active `r round(filter(summary_stats, completed == "Completed")$'Weeks (Mean)' / filter(summary_stats, completed == "Did Not Complete")$'Weeks (Mean)', 1)`× more weeks than non-completers. These large effect sizes confirm completion is associated with fundamentally different engagement patterns.
+
+## Evaluation (Cycle 1)
+
+### Key Findings
+
+1. **The activation gap:** `r round((1 - completion_overall$n_active / completion_overall$n_enrolled) * 100, 1)`% of enrolled learners never engage—a significant intervention opportunity
+2. **Bimodal engagement:** Two distinct groups (early dropouts vs. persisters) with little middle ground
+3. **Early dropout concentration:** Steepest retention decline in Weeks 1-3, then stabilization
+4. **Consistent differences:** Completers show higher engagement across all measured dimensions
+
+### Implications for Cycle 2
+
+Temporal analysis (Figure 4) reveals **Week 1 is particularly critical** for retention, motivating Cycle 2 investigation:
+
+> **Research Question for Cycle 2:** Is Week 1 engagement specifically predictive of course completion?
+
+If Week 1 engagement reliably predicts completion, this enables early identification of at-risk learners and timely intervention.
+
+### Limitations
+
+* **Demographic data quality:** High missingness limits demographic analysis. * **Self-selection bias:** Cannot account for underlying motivation differences. 
+* **Causal inference:** Observational data cannot establish whether higher engagement causes completion. 
+* **Platform-specific:** Findings may not generalize to other platforms or topics.
+
+# CYCLE 2: Week 1 Engagement as a Predictor
+
+## Business Understanding
+
+**Refined Objectives:** Build early warning system; enable targeted support; focus resources on at-risk learners identified by Week 1 engagement.
+
+**Data Mining Goals:** Quantify Week 1 engagement; establish relationship with completion; determine actionable thresholds.
+
+**Success Criteria:** Demonstrate clear relationship; identify thresholds; provide evidence-based recommendations.
+
+## Data Understanding (Cycle 2)
+
+### Week 1 Engagement Overview
+
+Week 1 contains `r round(mean(week1_steps_per_run$week1_total_steps))` steps on average, introducing foundational concepts. `r round(week1_summary$prop_week1_active * 100, 1)`% of enrolled learners engage with Week 1 content.
+
+```{r week1-distribution, fig.cap="Distribution of learners across Week 1 engagement levels"}
+plot_week1_distribution(learner_with_week1)
+```
+
+```{r week1-summary-table}
+week1_dist_table <- learner_with_week1 %>%
+  count(week1_engagement_level) %>%
+  mutate(
+    Percentage = paste0(round(n / sum(n) * 100, 1), "%")
+  ) %>%
+  select(
+    `Week 1 Engagement` = week1_engagement_level,
+    N = n,
+    `% of All Learners` = Percentage
+  )
+
+kable(week1_dist_table,
+      caption = "Distribution of Week 1 Engagement Levels",
+      booktabs = TRUE,
+      format.args = list(big.mark = ",")) %>%
+  kable_styling(latex_options = c("hold_position", "scale_down"), font_size = 9)
+```
+
+Among those who engage, Week 1 completion varies widely. A substantial group (`r round(filter(week1_dist_table, 'Week 1 Engagement' == "High")$N / sum(week1_dist_table$N) * 100, 1)`%) complete ≥75% of Week 1, showing strong initial commitment.
+
+### Week 1 Engagement by Completion Status
+
+```{r week1-by-completion-table}
+week1_comp_table <- week1_by_completion %>%
+  mutate(
+    completed = ifelse(completed, "Completed", "Did Not Complete"),
+    across(starts_with("mean"), ~round(.x, 1))
+  ) %>%
+  select(
+    Status = completed,
+    N = n,
+    `Mean Week 1 Steps` = mean_week1_steps_completed,
+    `Mean Week 1 Rate (%)` = mean_week1_completion_rate
+  )
+
+kable(week1_comp_table,
+      caption = "Week 1 Engagement by Eventual Completion Status",
+      booktabs = TRUE,
+      format.args = list(big.mark = ",")) %>%
+  kable_styling(latex_options = c("hold_position", "scale_down"), font_size = 9)
+```
+
+Table 6 shows learners who eventually complete engage substantially more in Week 1 than those who don't, suggesting Week 1 behavior is predictive.
+
+## Modeling (Cycle 2)
+
+### Primary Analysis: Completion Rate by Week 1 Engagement Level
+
+```{r completion-by-week1, fig.cap="Clear stepwise relationship between Week 1 engagement and course completion"}
+plot_completion_by_week1(learner_with_week1_active)
+```
+
+```{r completion-by-level-table}
+comp_by_level_table <- completion_by_week1_level %>%
+  mutate(
+    `Completion Rate` = paste0(round(completion_rate * 100, 1), "%")
+  ) %>%
+  select(
+    `Week 1 Engagement` = week1_engagement_level,
+    N = n,
+    `Completion Rate`
+  )
+
+kable(comp_by_level_table,
+      caption = "Completion Rates by Week 1 Engagement Level",
+      booktabs = TRUE,
+      format.args = list(big.mark = ",")) %>%
+  kable_styling(latex_options = c("hold_position", "scale_down"), font_size = 9)
+```
+
+**Key finding:** Clear, monotonic relationship between Week 1 engagement and completion (Figure 6, Table 7). High Week 1 engagers achieve `r round(filter(completion_by_week1_level, week1_engagement_level == "High")$completion_rate * 100, 1)`% completion vs. `r round(filter(completion_by_week1_level, week1_engagement_level == "Very Low")$completion_rate * 100, 1)`% for very low engagers—a `r round(filter(completion_by_week1_level, week1_engagement_level == "High")$completion_rate / filter(completion_by_week1_level, week1_engagement_level == "Very Low")$completion_rate, 1)`× difference in completion probability.
+
+### Granular Relationship: Steps Completed
+
+```{r week1-scatter, fig.cap="Smooth relationship between Week 1 steps completed and completion rate"}
+plot_week1_scatter(
+  learner_with_week1_active,
+  week1_total_steps = round(mean(week1_steps_per_run$week1_total_steps))
+)
+```
+
+Figure 7 shows the relationship between Week 1 steps and completion is approximately linear up to 50% of Week 1 content, then shows diminishing returns. Learners completing roughly half of Week 1 already show substantially elevated completion rates.
+
+### Threshold Analysis
+
+```{r threshold-analysis, fig.cap="Completion probability increases steadily with higher Week 1 thresholds"}
+plot_threshold_analysis(learner_with_week1_active)
+```
+
+Figure 8 demonstrates that as we set higher Week 1 completion thresholds, completion rate among learners meeting that threshold increases predictably. This supports using Week 1 engagement as an early warning indicator.
+
+**Practical threshold recommendation:** Learners completing <40% of Week 1 (the "Low" and "Very Low" groups) have completion rates well below average and should be considered at-risk.
+
+## Evaluation (Cycle 2)
+
+### Key Findings
+
+1. **Strong predictive relationship:** Week 1 engagement strongly associated with completion, with high engagers showing `r round(filter(completion_by_week1_level, week1_engagement_level == "High")$completion_rate * 100, 1)`% vs. `r round(filter(completion_by_week1_level, week1_engagement_level == "Very Low")$completion_rate * 100, 1)`% completion
+2. **Actionable threshold:** <40% Week 1 completion is reliable dropout risk indicator
+3. **Early signal:** Relationship established within first days, enabling timely intervention
+4. **Consistency:** Pattern holds across all seven course runs
+
+### Limitations and Caveats
+
+* **Correlation vs. causation:** Cannot determine whether low Week 1 engagement causes dropout or underlying factors cause both. 
+* **Data quality:** Missing demographics limit subgroup analysis. 
+* **Intervention effectiveness:** Analysis shows Week 1 predicts completion but doesn't prove interventions improve outcomes—RCT needed. '
+* **Generalizability:** Findings may be specific to FutureLearn platform, Cyber Security topic, or this course structure.
+* **Selection bias:** Week 1 engagement may reflect pre-existing commitment differences. 
+
+# Overall Conclusions
+
+This two-cycle CRISP-DM analysis demonstrates that early engagement strongly predicts MOOC completion. Learners completing ≥75% of Week 1 achieve `r round(filter(completion_by_week1_level, week1_engagement_level == "High")$completion_rate * 100, 1)`% completion vs. `r round(filter(completion_by_week1_level, week1_engagement_level == "Very Low")$completion_rate * 100, 1)`% for those completing <10%—a `r round(filter(completion_by_week1_level, week1_engagement_level == "High")$completion_rate / filter(completion_by_week1_level, week1_engagement_level == "Very Low")$completion_rate, 1)`× difference.
+
+**Practical implications:** MOOC providers can identify at-risk learners by day 7 based on Week 1 engagement (<40% completion threshold), enabling targeted intervention while learners remain engaged.
+
+**Methodological reflection:** The iterative CRISP-DM approach proved effective, with exploratory analysis informing focused investigation. ProjectTemplate, dplyr, and ggplot2 facilitated reproducible, efficient analysis of `r format(nrow(step_activity_all), big.mark=",")` interaction records.
+
+This study demonstrates that simple behavioral metrics available within the first week provide actionable insight into learner outcomes at scale, offering MOOC providers an evidence-based foundation for early intervention strategies.
+
+# Appendix: Technical Details
+
+* **Environment:** R `r R.version.string`; ProjectTemplate `r packageVersion("ProjectTemplate")`
+
+* **Key tools:** ProjectTemplate (structure), dplyr (manipulation), ggplot2 (visualization), kableExtra (tables), lubridate (dates)
+
+* **Data processed:** 7 course runs; step-activity.csv and enrolments.csv files; key derived variables: `completed`, `week1_engagement_level`, `total_steps_completed`, `week1_completion_rate`
+
+* **Reproducibility:** All analysis reproducible from submitted directory. Run `library(ProjectTemplate); load.project()` then knit report. Complete Git log in `GitLog.txt`.

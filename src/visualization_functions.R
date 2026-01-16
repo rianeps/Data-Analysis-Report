@@ -31,8 +31,7 @@ colors_engagement <- c(
 plot_completion_funnel <- function(completion_overall) {
     funnel_data <- tibble(
         stage = factor(c("Enrolled", "Active", "Completed"),
-                       levels = c("Enrolled", "Active", "Completed")
-        ),
+                       levels = c("Enrolled", "Active", "Completed")),
         count = c(
             completion_overall$n_enrolled,
             completion_overall$n_active,
@@ -41,13 +40,17 @@ plot_completion_funnel <- function(completion_overall) {
     ) |>
         mutate(
             percentage = count / completion_overall$n_enrolled * 100,
-            label = paste0(comma(count), "\n(", round(percentage, 1), "%)")
+            label = paste0(scales::comma(count), "\n(", round(percentage, 1), "%)")
         )
 
     ggplot(funnel_data, aes(x = stage, y = count)) +
         geom_col(aes(fill = stage), width = 0.7, show.legend = FALSE) +
-        geom_text(aes(label = label), vjust = -0.5, size = 4, fontface = "bold") +
-        scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.15))) +
+        geom_text(aes(label = label), vjust = -0.25, size = 4, fontface = "bold") +
+        scale_y_continuous(
+            labels = scales::comma,
+            expand = ggplot2::expansion(mult = c(0, 0.22))
+        ) +
+        coord_cartesian(clip = "off") +
         scale_fill_manual(values = c("#3498db", "#f39c12", "#2ecc71")) +
         labs(
             title = "Learner Engagement Funnel",
@@ -56,52 +59,68 @@ plot_completion_funnel <- function(completion_overall) {
             y = "Number of Learners",
             caption = "Active = completed at least one step"
         ) +
-        theme_mooc()
+        theme_mooc() +
+        theme(plot.margin = ggplot2::margin(18, 10, 10, 10))
 }
+
 
 # Steps completed (active learners), split by completion
 plot_steps_distribution <- function(learner_summary_active, total_steps = NULL) {
     medians <- learner_summary_active |>
-        group_by(completed) |>
-        summarise(median_steps = median(total_steps_completed), .groups = "drop")
+        dplyr::group_by(completed) |>
+        dplyr::summarise(median_steps = median(total_steps_completed), .groups = "drop")
 
-    p <- ggplot(learner_summary_active, aes(x = total_steps_completed, fill = completed)) +
-        geom_histogram(bins = 50, alpha = 0.7, position = "identity") +
-        geom_vline(
+    y_max <- max(
+        ggplot2::ggplot_build(
+            ggplot2::ggplot(learner_summary_active, ggplot2::aes(x = total_steps_completed, fill = completed)) +
+                ggplot2::geom_histogram(bins = 50, alpha = 0.7, position = "identity")
+        )$data[[1]]$count,
+        na.rm = TRUE
+    )
+
+    p <- ggplot2::ggplot(learner_summary_active, ggplot2::aes(x = total_steps_completed, fill = completed)) +
+        ggplot2::geom_histogram(bins = 50, alpha = 0.7, position = "identity") +
+        ggplot2::geom_vline(
             data = medians,
-            aes(xintercept = median_steps, color = completed),
-            linetype = "dashed", linewidth = 1
+            ggplot2::aes(xintercept = median_steps, color = completed),
+            linetype = "dashed", linewidth = 0.9
         ) +
-        scale_fill_manual(
+        ggplot2::scale_fill_manual(
             values = colors_completion,
             name = "Completed:",
             labels = c("FALSE" = "No", "TRUE" = "Yes")
         ) +
-        scale_color_manual(values = colors_completion, guide = "none") +
-        scale_x_continuous(labels = comma) +
-        scale_y_continuous(labels = comma) +
-        labs(
+        ggplot2::scale_color_manual(values = colors_completion, guide = "none") +
+        ggplot2::scale_x_continuous(labels = scales::comma) +
+        ggplot2::scale_y_continuous(labels = scales::comma, expand = ggplot2::expansion(mult = c(0, 0.05))) +
+        ggplot2::labs(
             title = "Distribution of Steps Completed",
             subtitle = "Bimodal pattern: early dropouts vs. completers",
             x = "Total Steps Completed",
             y = "Number of Learners",
             caption = "Dashed lines show medians"
         ) +
-        theme_mooc()
+        theme_mooc() +
+        ggplot2::theme(
+            plot.margin = ggplot2::margin(6, 6, 6, 6),
+            legend.position = "top"
+        )
 
     if (!is.null(total_steps)) {
         p <- p +
-            geom_vline(xintercept = total_steps, linetype = "dotted", color = "black", linewidth = 0.8) +
-            annotate(
+            ggplot2::geom_vline(xintercept = total_steps, linetype = "dotted", color = "black", linewidth = 0.7) +
+            ggplot2::annotate(
                 "text",
-                x = total_steps, y = Inf,
+                x = total_steps,
+                y = y_max * 1.03,
                 label = paste("Total steps:", total_steps),
-                hjust = 1.1, vjust = 1.5, size = 3, fontface = "italic"
+                hjust = 1.05, vjust = 0, size = 3, fontface = "italic"
             )
     }
 
     p
 }
+
 
 # Engagement metrics by completion
 plot_engagement_comparison <- function(learner_summary_active) {
@@ -201,17 +220,24 @@ plot_completion_by_demographic <- function(learner_summary, demographic_var = "a
 
 # Week 1 engagement level distribution
 plot_week1_distribution <- function(learner_with_week1) {
+
     week1_dist <- learner_with_week1 |>
         count(week1_engagement_level) |>
         mutate(
             percentage = n / sum(n) * 100,
-            label = paste0(comma(n), "\n(", round(percentage, 1), "%)")
+            label = if_else(percentage >= 8, paste0(comma(n), "\n(", round(percentage, 1), "%)"), NA_character_)
         )
 
     ggplot(week1_dist, aes(x = "", y = n, fill = week1_engagement_level)) +
-        geom_col(width = 1) +
-        geom_text(aes(label = label), position = position_stack(vjust = 0.5), size = 3.5, fontface = "bold") +
+        geom_col(width = 0.9) +
+        geom_text(
+            aes(label = label),
+            position = position_stack(vjust = 0.5),
+            size = 3.4, fontface = "bold", color = "black",
+            na.rm = TRUE
+        ) +
         scale_fill_manual(values = colors_engagement, name = "Week 1 Engagement:") +
+        scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.05))) +
         labs(
             title = "Distribution of Week 1 Engagement Levels",
             subtitle = "How learners engaged in their first week",
@@ -220,8 +246,12 @@ plot_week1_distribution <- function(learner_with_week1) {
             caption = "Levels based on Week 1 completion percentage"
         ) +
         theme_mooc() +
-        theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+        theme(
+            axis.text.x = element_blank(),
+            axis.ticks.x = element_blank()
+        )
 }
+
 
 # Completion rate by Week 1 engagement level
 plot_completion_by_week1 <- function(learner_with_week1_active) {

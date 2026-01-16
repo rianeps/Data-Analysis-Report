@@ -61,9 +61,3 @@ dup_groups_step_activity <- step_activity_all |>
 stopifnot(is.data.frame(step_activity_all))
 stopifnot(is.data.frame(enrolments_all))
 
-
-# 4) cache
-ProjectTemplate::cache("step_activity_all")
-ProjectTemplate::cache("enrolments_all")
-ProjectTemplate::cache("inactive_summary")
-ProjectTemplate::cache("dup_groups_step_activity")
